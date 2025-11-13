@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from scripts.llm_pdf_extractor import extract_pdf_with_llm
+from scripts.remote_llm import RemoteLLM
 
 app = FastAPI(
     title="EB3 Proposal Rate Extractor API",
@@ -29,6 +30,8 @@ async def root():
         "message": "EB3 Proposal Rate Extractor API",
         "endpoints": {
             "POST /extract": "Upload a PDF file to extract rate data",
+            "POST /extract-batch": "Upload multiple PDF files to extract rate data",
+            "POST /test-llm": "Test the LLM connection with a simple prompt",
             "GET /health": "Check API health status",
         },
     }
@@ -37,6 +40,43 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+class TestLLMRequest(BaseModel):
+    system_prompt: Optional[str] = "You are a helpful assistant."
+    user_prompt: str
+    max_tokens: int = 512
+    temperature: float = 0.0
+    top_p: float = 1.0
+
+
+class TestLLMResponse(BaseModel):
+    response: str
+    status: str = "success"
+
+
+@app.post("/test-llm", response_model=TestLLMResponse)
+async def test_llm(request: TestLLMRequest):
+    """
+    Simple endpoint to test the LLM connection.
+    
+    Send a text prompt and receive the LLM's response.
+    Useful for verifying the LLM endpoint is accessible and working.
+    """
+    try:
+        llm = RemoteLLM()
+        response = await llm.chat(
+            system_prompt=request.system_prompt,
+            user_prompt=request.user_prompt,
+            max_new_tokens=request.max_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+        )
+        return TestLLMResponse(response=response, status="success")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error calling LLM: {str(e)}"
+        )
 
 
 async def process_pdf_upload(
