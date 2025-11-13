@@ -1,3 +1,4 @@
+import logging
 import tempfile
 import uuid
 from pathlib import Path
@@ -8,6 +9,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from scripts.llm_pdf_extractor import extract_pdf_with_llm
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="EB3 Proposal Rate Extractor API",
@@ -49,6 +58,7 @@ async def process_pdf_upload(
     Core function to process an uploaded PDF and extract rates.
     """
     if not pdf.filename or not pdf.filename.endswith(".pdf"):
+        logger.warning(f"Invalid file type received: {pdf.filename}")
         raise HTTPException(status_code=400, detail="File must be a PDF")
 
     # Create temporary file to store uploaded PDF
@@ -62,29 +72,42 @@ async def process_pdf_upload(
         # Save uploaded file to temporary location (use UUID to avoid filename conflicts)
         file_id = str(uuid.uuid4())
         temp_pdf_path = temp_dir / f"upload_{file_id}.pdf"
+        logger.info(f"Saving uploaded PDF to temporary location: {temp_pdf_path}")
         with open(temp_pdf_path, "wb") as f:
             content = await pdf.read()
             f.write(content)
+        logger.info(f"PDF saved: {len(content)} bytes")
 
         # Determine output path (optional, only if save_output is True)
         if save_output:
             output_dir = Path("output")
             output_dir.mkdir(parents=True, exist_ok=True)
             temp_output_path = output_dir / f"{Path(pdf.filename).stem}.json"
+            logger.info(f"Output will be saved to: {temp_output_path}")
         else:
             # Use a temporary output path that we'll read and delete
             temp_output_path = temp_dir / f"output_{file_id}.json"
+            logger.debug(f"Using temporary output path: {temp_output_path}")
 
-        # Extract rates using LLM
+        # Extract rates using LLM (optimized with parallel processing)
+        logger.info("Starting LLM extraction process...")
         result = await extract_pdf_with_llm(
             pdf_path=temp_pdf_path,
             output_path=temp_output_path,
             pages_per_chunk=pages_per_chunk,
             max_chars=max_chars,
+            max_concurrent=3,  # Process up to 3 chunks in parallel
+            max_tokens=2048,  # Increased token limit for complex responses
         )
 
         # Remove file path from result (not needed in API response)
         result.pop("file", None)
+
+        plans_count = len(result.get("plans", []))
+        logger.info(
+            f"Extraction successful: {plans_count} plans found, "
+            f"carrier: {result.get('carrier') or 'None'}"
+        )
 
         return ExtractResponse(
             file=pdf.filename,
@@ -96,21 +119,24 @@ async def process_pdf_upload(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error processing PDF {pdf.filename}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
     finally:
         # Cleanup temporary files (keep if save_output=True for output)
         if temp_pdf_path and temp_pdf_path.exists():
             temp_pdf_path.unlink()
+            logger.debug(f"Cleaned up temporary PDF: {temp_pdf_path}")
 
         if not save_output and temp_output_path and temp_output_path.exists():
             temp_output_path.unlink()
+            logger.debug(f"Cleaned up temporary output: {temp_output_path}")
 
 
 @app.post("/extract", response_model=ExtractResponse)
 async def extract_rates(
     pdf: UploadFile = File(..., description="PDF proposal file"),
-    pages_per_chunk: int = 2,
+    pages_per_chunk: int = 1,
     max_chars: int = 6000,
     save_output: bool = False,
 ):
@@ -124,6 +150,11 @@ async def extract_rates(
 
     Returns extracted carrier name, plan names/IDs, rate structures, and rates.
     """
+    logger.info(
+        f"Extract request received: file={pdf.filename}, "
+        f"pages_per_chunk={pages_per_chunk}, max_chars={max_chars}, "
+        f"save_output={save_output}"
+    )
     return await process_pdf_upload(pdf, pages_per_chunk, max_chars, save_output)
 
 
